@@ -77,7 +77,7 @@ Implementation
 ### `Cell`s
 
 We start with the basic unit of memory - a `Cell`. A `Cell` is a map from
-addresses to values. The addresses of sort `Addr` and the values of sort `Val`
+addresses to values. The addresses of sort `Addr` and the values of sort `Cell`
 are both supersorts of `Nat`. This is a convenience, and does not affect much
 about how they behave; though as the memory model gets more concrete they should
 be switched to `MachineInt`s.
@@ -172,13 +172,189 @@ of set addition and subtraction) with the operators `|` (addition) and `|-`
 (subtraction). From these definitions follows the `intersect` and `sd`
 (symmetric differenc) operations.
 
-maude
-
-```maude{exec:memory-model.maude}
-fmod MEM is
+```maude
+fmod CELL is
     protecting NAT .
 
-    sorts Val Addr .
+    sorts Addr Val .
+    subsorts Nat < Addr Val .
+    sort Cell .
+
+    var A : Addr .
+    vars V V1 V2 : Val .
+    vars C C1 C2 : Cell .
+
+    op noVal : -> Val [ctor] .
+    op noAddr : -> Addr [ctor] .
+    ----------------------------
+
+    op cNil : -> Cell [ctor] .
+    op _->_ : Addr Val -> Cell [ctor] .
+    op _|_ : Cell Cell -> Cell [ctor assoc comm id: cNil] .
+    -------------------------------------------------------
+    eq A -> noVal = cNil .
+    eq noAddr -> V = cNil .
+
+    op _@_ : Cell Addr -> Val .
+    ---------------------------
+    eq ((A -> V) | C) @ A   = V .
+    eq C @ A                = noVal [owise] .
+
+    op _*_ : Cell Cell -> Cell [gather (E e)].
+    ------------------------------------------
+    eq ((A -> V1) | C1) * ((A -> V2) | C2)  = ((A -> V2) | C1) * C2 .
+    eq C1 * C2                              = C1 | C2 [owise] .
+endfm
+```
+
+```maude{exec:memory-model.maude}
+set include BOOL off .
+
+fmod MEM is
+    sort AddrMap .
+    sort Mem .
+
+    vars AM AM1 AM2 AM3 : AddrMap .
+    vars M M' M1 M2 : Mem .
+
+    op aNil : -> AddrMap [ctor] .
+    op aID : -> AddrMap [ctor] .
+    op _._ : AddrMap AddrMap -> AddrMap [gather (e E)] .
+    ----------------------------------------------------
+
+    op mNil : -> Mem [ctor] .
+    op _|_ : Mem Mem -> Mem [ctor assoc comm id: mNil] .
+    ----------------------------------------------------
+
+    op _->_ : AddrMap Mem -> Mem [ctor] .
+    -------------------------------------
+    eq (AM1 . AM2) -> M1                = AM2 -> (AM1 -> M1) .
+
+    op _@_ : Mem AddrMap -> Mem .
+    -----------------------------
+    eq ((AM1 -> M1) | M) @ AM1          = M1 .
+    eq ((AM1 -> M1) | M) @ (AM3 . AM2)  = ((AM1 -> M1) | M) @ AM2 @ AM3 .
+    eq M @ AM                           = mNil [owise] .
+
+    op _*_ : Mem Mem -> Mem [gather (E e) id: mNil] .
+    -------------------------------------------------
+    eq ((AM1 -> M1) | M) * ((AM1 -> M2) | M')
+                                = ((AM1 -> M2) | M) * M' .
+    eq ((AM1 -> M1) | M) * ((AM2 -> M2) | M')
+                                = ((AM2 -> M2) | (AM1 -> M1) | M) * M' [owise] .
+endfm
+
+fmod CELL is
+    protecting MEM .
+
+    sort Cell .
+    subsort Cell < Mem .
+
+    op mNil : -> Cell [ctor ditto] .
+    op 0 : -> Cell [ctor] .
+    op c : Cell -> Cell [ctor iter] .
+endfm
+
+fmod COMP-ADDR is
+    protecting MEM .
+    protecting BOOL .
+
+    sort CompAddr .
+    subsort CompAddr < AddrMap .
+
+    vars A1 A2 : CompAddr .
+
+    op aNil : -> CompAddr [ctor ditto] .
+    ------------------------------------
+
+    op _<_ : CompAddr CompAddr -> Bool .
+    op _<=_ : CompAddr CompAddr -> Bool .
+    -------------------------------------
+    eq aNil < A2    = false .
+    eq A1 < aNil    = false .
+    eq A1 < A1      = false .
+    eq A1 <= A2     = (A1 == A2) or A1 < A2 .
+endfm
+
+fmod NAT-ADDR is
+    protecting COMP-ADDR .
+
+    sort NatAddr .
+    subsort NatAddr < CompAddr .
+
+    vars A1 A2 : NatAddr .
+
+    op aNil : -> NatAddr [ctor ditto] .
+    op 0 : -> NatAddr [ctor] .
+    op a : NatAddr -> NatAddr [ctor iter] .
+    ---------------------------------------
+    eq a(A1) < a(A2)    = A1 < A2 .
+    eq 0 < a(A2)        = true .
+    eq a(A1) < 0        = false .
+endfm
+
+fmod BTREE-CELL is
+    protecting CELL .
+    protecting NAT-ADDR .
+
+    sorts BTreeField BTreeKey .
+    subsort BTreeField < AddrMap .
+    subsort BTreeKey < CompAddr .
+
+    vars A1 A2 : CompAddr .
+    var M1 M2 : Mem .
+    vars K K' : BTreeKey .
+    var F : BTreeField .
+
+    op btree : NatAddr -> BTreeKey [ctor] .
+    ops v l h : -> BTreeField [ctor] .
+
+    eq btree(A1) < btree(A2) = A1 < A2 .
+
+    ceq (K' -> M1) @ K          = M1 @ (K . l)                      if K < K' .
+    ceq (K' -> M1) @ K          = M1 @ (K . h)                      if K' < K .
+    ceq (K' -> M1) * (K -> M2)  = (K' -> (M1 * ((K . l) -> M2)))    if K < K' .
+    ceq (K' -> M1) * (K -> M2)  = (K' -> (M1 * ((K . h) -> M2)))    if K' < K .
+endfm
+```
+
+```maude
+fmod BOUNDED-MEM is
+    extending MEM .
+
+    sort AddrComp .
+    subsorts Addr < AddrComp < AddrMap .
+
+    vars A AS AE : AddrComp .
+
+    op bounded : AddrComp AddrComp -> AddrMap [ctor] .
+    --------------------------------------------------
+    ceq bounded(AS, AE) @ A = A if AS <= A and A < AE .
+    ceq bounded(AS, AE) @ A = noAddr if A < AS or AE <= A .
+endfm
+```
+
+```maude
+--- set include off .
+---
+---
+--- fmod CELL is
+--- ---- ====
+---     sort Cell .
+---
+---     op 0 : -> Addr [ctor] .
+---     op s : Addr -> Addr [ctor iter] .
+---     ---------------------------------
+---     eq s^18446744073709551616(0) = 0 .
+--- endfm
+
+
+fmod MEM is
+---- ===
+    protecting NAT .
+    protecting BOOL .
+
+    sorts Addr Val .
     subsorts Nat < Addr Val .
     sorts Mem MemType .
 
@@ -190,39 +366,67 @@ fmod MEM is
     op _|_ : Mem Mem -> Mem [ctor assoc comm id: mNil] .
     ----------------------------------------------------
 
-    var V : Val .
     var A : Addr .
-    vars V1 V2 : Val .
-    vars M M1 M2 : Mem .
+    vars V V1 V2 : Val .
+    vars M M' M1 M2 : Mem .
 
-    op _@_ : Mem Addr -> Val .
-    op _*_ : Mem Mem -> Mem [gather (E e)] .
-    op _\_ : Mem Addr -> Mem [gather (E e)] .
+    op _@_ : Mem Addr -> Val [gather (E e)] .
     -----------------------------------------
-    eq ((A |=> V) | M) @ A  = V .
+    eq ((A |=> V) | M) @ A  = A .
     eq M @ A                = noVal [owise] .
+
+    op _*_ : Mem Mem -> Mem [gather (E e)] .
+    ----------------------------------------
     eq ((A |=> V1) | M1) * ((A |=> V2) | M2)
                             = ((A |=> V2) | M1) * M2 .
-    eq M * M1 = M | M1 [owise] .
-    eq ((A |=> V) | M) \ A  = M .
-    eq M \ A                = M [owise] .
+    eq (M | M1) * (M' | M2) = M | M1 | M' | M2 [owise] .
 
-    op _:_ : Mem MemType -> Mem .
-    -----------------------------
+    op _\_ : Mem Addr -> Mem [gather (E e)] .
+    -----------------------------------------
+    eq ((A |=> V) | M) \ A  = M .
+    eq (M | M1) \ A         = M | M1 [owise] .
 
     op set? : Mem Addr -> Bool .
     op unset? : Mem Addr -> Bool .
     ------------------------------
-    eq set? (M, A)      = (M @ A) =/= noVal .
-    eq unset? (M, A)    = (M @ A) == noVal .
+    eq set? (M, A)          = (M @ A) =/= noVal .
+    eq unset? (M, A)        = (M @ A) == noVal .
+endfm
+
+fmod MEM-BOUNDED is
+---- ===========
+    extending MEM .
+
+    var V : Val .
+    vars K A1 A2 : Addr .
+    vars M M' : Mem .
+
+    op bounded : Addr Addr -> MemType [ctor] .
+    ------------------------------------------
+
+    op _in(_,_) : Addr Addr Addr -> Bool .
+    op _notin(_,_) : Addr Addr Addr -> Bool .
+    -----------------------------------------
+    eq K in(A1, A2)             = A1 <= K and K < A2 .
+    eq K notin(A1, A2)          = not (K in(A1, A2)) .
+
+    ceq M : bounded(A1, A2) @ K = M @ K
+                                if K in(A1, A2) .
+    ceq M : bounded(A1, A2) @ K = noVal
+                                if K notin(A1, A2) .
+    ceq M : bounded(A1, A2) * ((K |=> V) | M')
+                                = (M * (K |=> V)) : bounded(A1, A2) * M'
+                                if K in(A1, A2) .
+    ceq M : bounded(A1, A2) * ((K |=> V) | M')
+                                = M : bounded(A1, A2) * M'
+                                if K notin(A1, A2) .
 endfm
 
 fmod BTREE is
-    protecting BOOL .
-    including MEM .
+    extending MEM .
 
-    vars A K : Addr .
     var V : Val .
+    vars A K : Addr .
     vars M M' : Mem .
 
     op btree : Addr -> MemType [ctor] .
@@ -270,6 +474,21 @@ fmod BTREE is
                             = M * (A + 3 |=> nextAddr(M : btree(0))) : btree(A)
                                 * ((K |=> V) | M')
                             if (M @ A) < K and unset?(M, A + 3) .
+endfm
+
+fmod STRUCT is
+    extending MEM .
+
+
+endfm
+
+fmod BTREE-ELEMS is
+    protecting BTREE .
+
+    op btree-elem : Addr Addr Addr -> MemType [ctor] .
+    --------------------------------------------------
+
+    
 endfm
 ```
 
