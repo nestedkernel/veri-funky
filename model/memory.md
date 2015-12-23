@@ -390,7 +390,7 @@ datastructure implementation details to be forgotten by the CPU.
 
 I also haven't had the time to implement basic memory permissions and
 segmentation using this memory model. In previous versions (see the [github
-page](https://github.com/nested-kernel/veri-funky)) I have implemented
+page](https://github.com/nestedkernel/veri-funky)) I have implemented
 permissions and memory bounding. They boil down to a new type of address which
 restricts the reads and writes that make it to the underlying `Cell`. I hope to
 implement something like the Nested Kernel memory model[@nestedkernel], which
