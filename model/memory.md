@@ -1,9 +1,9 @@
 ---
 title: Memory Model
 author: Everett Hildenbrandt
-subtitle: Jose Meseguer
 geometry: margin=2.5cm
 execute: memory-model.maude
+format: latex
 ...
 
 
@@ -45,7 +45,7 @@ would use the defined operational semantics of the informal ones as a compiler
 to our "memory" assembly. Our hardware is making it hard to reason about memory;
 CPUs are large complicated things with lots of inherent non-determinism.
 
-Normal CFPGAs (Field Programmable Gate Arrays), on the other hand, are
+Normal FPGAs (Field Programmable Gate Arrays), on the other hand, are
 comparatively simple to reason about. In the simplest case, we can think of them
 as lots of configurable LUTs (lookup tables), which are functions in the set
 `[BitVect{X} -> BitVect{X}]` (with `X` a bit width). We can select which
@@ -74,208 +74,99 @@ Maude should be implementable in FPGAs, rewriting may be harder.
 Implementation
 ==============
 
-### `Cell`s
+Addresses and Cells
+-------------------
 
-We start with the basic unit of memory - a `Cell`. A `Cell` is a map from
-addresses to values. The addresses of sort `Addr` and the values of sort `Cell`
-are both supersorts of `Nat`. This is a convenience, and does not affect much
-about how they behave; though as the memory model gets more concrete they should
-be switched to `MachineInt`s.
-
-`Cell`s also grow as large as you want, it's up to higher levels of the
-description to make sure they don't do so in an unrealistic manner. This is
-another convenience. `Cell`s maps can be updated.
-
-```maude
-fmod ADDR is
-    protecting BOOL .
-    protecting NAT .
-
-    sort Addr AddrDomain .
-    subsort Nat < Addr < AddrDomain .
-
-    op noNum : -> Addr [ctor] .
-    ---------------------------
-
-    var N : Nat .
-    vars A B : Addr .
-
-    op min : Addr Addr -> Addr [ditto] .
-    op max : Addr Addr -> Addr [ditto] .
-    ------------------------------------
-    eq min(noNum, A) = noNum .
-    eq max(noNum, A) = noNum .
-
-    vars E S : Nat .
-
-    op (_,_) : Addr Addr -> AddrDomain [ctor] .
-    -------------------------------------------
-    eq (noNum,E)        = noNum .
-    eq (S,noNum)        = noNum .
-    ceq (S,E)           = noNum if E <= S .
-
-    op _u_ : AddrDomain AddrDomain -> AddrDomain [ctor assoc comm id: noNum] .
-    --------------------------------------------------------------------------
-    eq E u (S,E)            = (S, s(E)) .
-    ceq S u (S1,E1)         = (S1,E1)               if S1 <= S /\ S < E1 .
-    ceq (S1,E1) u (S2,E2)   = (S1, max(E1,E2))      if S1 <= S2 /\ S2 <= E1 .
-
-    vars E1 E2 S1 S2 : Nat .
-    vars AD1 AD2 AD3 : AddrDomain .
-
-    op valid : AddrDomain -> Bool .
-    -------------------------------
-    eq valid (noNum)        = false .
-    eq valid (S)            = true .
-    eq valid (S, E)         = S < E .
-    eq valid (AD1 u AD2)    = valid (AD1) and valid (AD2) .
-
-    op _\_ : AddrDomain AddrDomain -> AddrDomain .
-    ----------------------------------------------
-    ---eq noNum \ AD1          = noNum .
-    ---eq AD1 \ noNum          = AD1 .
-    eq AD1 \ ((S,E) u AD3)  = (AD1 \ (S,E)) \ AD3 .
-    eq ((S,E) u AD2) \ AD3  = ((S,E) \ AD3) u (AD2 \ AD3) .
-    ceq S1 \ S2             = noNum                 if S1 == S2 .
-    ceq S1 \ S2             = S1                    if S1 =/= S2 .
-    ceq (S1,E1) \ (S2,E2)   = (S1, min(E1,S2))      if valid(S2,E2) and S1 <= S2 .
-    ceq (S1,E1) \ (S2,E2)   = (max(S1,s(E2)), E1)   if valid(S2,E2) and S2 <= S1 .
-    ceq S \ (S2,E2)         = S                     if valid(S2,E2) and (S < S2 or E2 <= S) .
-    ceq S \ (S2,E2)         = noNum                 if valid(S2,E2) and (S2 <= S and S < E2) .
-    ceq (S1,E1) \ S         = (S1,S) u (s(S), E1)   if S1 <= S and S < E1 .
-    ceq (S1,E1) \ S         = (S1,E1)               if S < S1 or E1 <= S .
-
-    op isect : AddrDomain AddrDomain -> AddrDomain [comm] .
-    -------------------------------------------------------
-    eq isect (AD1, AD2)     = AD1 \ (AD1 \ AD2) .
-
-    op sdiff : AddrDomain AddrDomain -> AddrDomain [comm] .
-    -------------------------------------------------------
-    eq sdiff (AD1, AD2)     = (AD1 u AD2) \ isect(AD1, AD2) .
-
-    op _in_ : AddrDomain AddrDomain -> Bool .
-    -----------------------------------------
-    eq AD1 in AD2 = (AD1 \ AD2) == noNum .
-endfm
-```
-
-### Memory Segmentation
-
-Operating systems need to isolate memory between different components of
-computers. To do this, we'll need some way to describe ranges of memory. Here we
-have `ADDR-RANGE`, which will be used to act as a restriction on the domains of
-higher-level memory operations.
-
-The sort `AddrDomain` is added. It represents a set of `Addr` which can be used
-by a process. `AddrDomain`s can be added and subtracted (with the normal notions
-of set addition and subtraction) with the operators `|` (addition) and `|-`
-(subtraction). From these definitions follows the `intersect` and `sd`
-(symmetric differenc) operations.
-
-```maude
-fmod CELL is
-    protecting NAT .
-
-    sorts Addr Val .
-    subsorts Nat < Addr Val .
-    sort Cell .
-
-    var A : Addr .
-    vars V V1 V2 : Val .
-    vars C C1 C2 : Cell .
-
-    op noVal : -> Val [ctor] .
-    op noAddr : -> Addr [ctor] .
-    ----------------------------
-
-    op cNil : -> Cell [ctor] .
-    op _->_ : Addr Val -> Cell [ctor] .
-    op _|_ : Cell Cell -> Cell [ctor assoc comm id: cNil] .
-    -------------------------------------------------------
-    eq A -> noVal = cNil .
-    eq noAddr -> V = cNil .
-
-    op _@_ : Cell Addr -> Val .
-    ---------------------------
-    eq ((A -> V) | C) @ A   = V .
-    eq C @ A                = noVal [owise] .
-
-    op _*_ : Cell Cell -> Cell [gather (E e)].
-    ------------------------------------------
-    eq ((A -> V1) | C1) * ((A -> V2) | C2)  = ((A -> V2) | C1) * C2 .
-    eq C1 * C2                              = C1 | C2 [owise] .
-endfm
-```
+The basic parts of memory are addresses and cells. They have a very simple
+initial algebra - addresses can be composed (with `_._`) and cells can be held
+next to each other (with `_|_`).
 
 ```maude{exec:memory-model.maude}
 set include BOOL off .
 
-fmod MEM is
-    sort AddrMap .
-    sort Mem .
+fmod ADDR is
+    sort Addr .
 
-    vars AM AM1 AM2 AM3 : AddrMap .
-    vars M M' M1 M2 : Mem .
-
-    op aNil : -> AddrMap [ctor] .
-    op aID : -> AddrMap [ctor] .
-    op _._ : AddrMap AddrMap -> AddrMap [gather (e E)] .
-    ----------------------------------------------------
-
-    op mNil : -> Mem [ctor] .
-    op _|_ : Mem Mem -> Mem [ctor assoc comm id: mNil] .
-    ----------------------------------------------------
-
-    op _->_ : AddrMap Mem -> Mem [ctor] .
-    -------------------------------------
-    eq (AM1 . AM2) -> M1                = AM2 -> (AM1 -> M1) .
-
-    op _@_ : Mem AddrMap -> Mem .
-    -----------------------------
-    eq ((AM1 -> M1) | M) @ AM1          = M1 .
-    eq ((AM1 -> M1) | M) @ (AM3 . AM2)  = ((AM1 -> M1) | M) @ AM2 @ AM3 .
-    eq M @ AM                           = mNil [owise] .
-
-    op _*_ : Mem Mem -> Mem [gather (E e) id: mNil] .
-    -------------------------------------------------
-    eq ((AM1 -> M1) | M) * ((AM1 -> M2) | M')
-                                = ((AM1 -> M2) | M) * M' .
-    eq ((AM1 -> M1) | M) * ((AM2 -> M2) | M')
-                                = ((AM2 -> M2) | (AM1 -> M1) | M) * M' [owise] .
+    op aNil : -> Addr [ctor] .
+    op _._ : Addr Addr -> Addr [gather (e E)] .
+    -------------------------------------------
 endfm
 
 fmod CELL is
-    protecting MEM .
-
     sort Cell .
-    subsort Cell < Mem .
 
-    op mNil : -> Cell [ctor ditto] .
-    op 0 : -> Cell [ctor] .
-    op c : Cell -> Cell [ctor iter] .
+    op cNil : -> Cell [ctor] .
+    op _|_ : Cell Cell -> Cell [ctor assoc comm id: cNil] .
+    -------------------------------------------------------
 endfm
+```
 
+When creating your specific type of address or cell, make them a subsort of the
+sorts `Addr` and `Cell` respectively. Some example address and cell
+implementations are given here.
+
+### Natural Number Cells
+
+We can start with cells which are isomorphic to the natural numbers. A new sort
+`NatCell` is declared as a subsort of `Cell` (so that the operations available
+to generic `Cell`s are available here). Each one of these could be one "word" or
+"byte" in computer memory.
+
+```maude{exec:memory-model.maude}
+fmod NAT-CELL is
+    protecting CELL .
+
+    sort NatCell .
+    subsort NatCell < Cell .
+
+    op 0 : -> NatCell [ctor] .
+    op c : NatCell -> NatCell [ctor iter] .
+    ---------------------------------------
+endfm
+```
+
+Real memory isn't unbounded like the natural numbers. By importing
+`BOUNDED-NAT-CELL` instead of `NAT-CELL`, we can specify the wrap-around point
+of the naturals we use. Below I've supplied a 64-bit `NatCell` implementation.
+
+```maude{exec:memory-model.maude}
+fmod BOUNDED-NAT-CELL is
+    including NAT-CELL .
+
+    eq c^18446744073709551616(0) = 0 .      --- 64 bit wrap-around
+endfm
+```
+
+### Natural Number Addresses
+
+The first functionality we can add to normal addresses is comparability. This
+can assist with data-structure traversals and usage. For this, we create a new
+sort `CompAddr` and make it a sub-sort of `Addr`, as well as defining the
+operations `_<_` and `_<=_` for `CompAddr`.
+
+```maude{exec:memory-model.maude}
 fmod COMP-ADDR is
-    protecting MEM .
+    protecting ADDR .
     protecting BOOL .
 
     sort CompAddr .
-    subsort CompAddr < AddrMap .
+    subsort CompAddr < Addr .
 
     vars A1 A2 : CompAddr .
-
-    op aNil : -> CompAddr [ctor ditto] .
-    ------------------------------------
 
     op _<_ : CompAddr CompAddr -> Bool .
     op _<=_ : CompAddr CompAddr -> Bool .
     -------------------------------------
-    eq aNil < A2    = false .
-    eq A1 < aNil    = false .
-    eq A1 < A1      = false .
-    eq A1 <= A2     = (A1 == A2) or A1 < A2 .
+    eq A1 < A1  = false .
+    eq A1 <= A2 = (A1 == A2) or A1 < A2 .
 endfm
+```
 
+Here I've implemented natural-number addresses. These are made a sub-sort of
+`CompAddr`, with `_<_` defined appropriately. I've also provided
+`BOUNDED-NAT-ADDR` if you want to use more realistic bounded natural numbers.
+
+```maude{exec:memory-model.maude}
 fmod NAT-ADDR is
     protecting COMP-ADDR .
 
@@ -284,7 +175,6 @@ fmod NAT-ADDR is
 
     vars A1 A2 : NatAddr .
 
-    op aNil : -> NatAddr [ctor ditto] .
     op 0 : -> NatAddr [ctor] .
     op a : NatAddr -> NatAddr [ctor iter] .
     ---------------------------------------
@@ -293,223 +183,229 @@ fmod NAT-ADDR is
     eq a(A1) < 0        = false .
 endfm
 
-fmod BTREE-CELL is
-    protecting CELL .
-    protecting NAT-ADDR .
+fmod BOUNDED-NAT-ADDR is
+    including NAT-ADDR .
 
-    sorts BTreeField BTreeKey .
-    subsort BTreeField < AddrMap .
+    eq a^18446744073709551616(0) = 0 .      --- 64 bit wrap-around
+endfm
+```
+
+Memory
+------
+
+Memory is a pointer from addresses to cells (`_->_`). The result can be treated
+as a new cell - thus memory structures can be nested arbitrarily.
+
+For every type of memory, you must provide the definitions of the operators
+`_@_` (lookup) and `_*_` (update). The default ones can handle addresses which
+are only comparable with equality. If you want to use comparable addresses (with
+the `_<_` operator), for example, you'll have to define how that operator
+affects the memory lookup (`_@_`) and update (`_*_`) operators.
+
+```maude{exec:memory-model.maude}
+fmod MEM is
+    protecting ADDR .
+    protecting CELL .
+
+    vars A A' A1 A2 : Addr .
+    vars C C' C1 C2 : Cell .
+
+    op _->_ : Addr Cell -> Cell [ctor] .
+    ------------------------------------
+    eq (A2 . A1) -> C           = A1 -> (A2 -> C) .
+
+    op _@_ : Cell Addr -> Cell [gather (e E)] .
+    -------------------------------------------
+    eq ((A1 -> C1) | C) @ A1    = C1 .
+    eq C @ (A2 . A1)            = (C @ A1) @ A2 .
+    eq C @ A                    = cNil [owise] .
+
+    op _*_ : Cell Cell -> Cell [gather (E e)] .
+    -------------------------------------------
+    eq C * cNil                 = C .
+    eq cNil * C                 = C .
+    eq ((A1 -> C1) | C) * ((A1 -> C2) | C')
+                                = ((A1 -> (C1 * C2)) | C) * C' .
+    eq C * ((A2 -> C2) | C')    = ((A2 -> C2) | C) * C' [owise] .
+    eq C * C'                   = C' [owise] .
+endfm
+```
+
+### Bounded Naturals Memory
+
+To now make a memory where the cells and addresses are bounded natural numbers,
+we just have to import the `MEM` module, along with the `BOUNDED-NAT-ADDR` and
+`BOUNDED-NAT-CELL` modules.
+
+```maude{exec:memory-model.maude}
+fmod BOUNDED-NAT-MEM is
+    protecting MEM .
+    protecting BOUNDED-NAT-ADDR .
+    protecting BOUNDED-NAT-CELL .
+endfm
+```
+
+### Bounded Naturals Binary Tree
+
+Suppose we want a more complex data-structure. Here I've implemented a sample
+binary tree (`BOUNDED-NAT-BTREE-MEM`). I've imported `BOUNDED-NAT-MEM` so we're
+working with bounded naturals as the keys and values.
+
+I've also added new sorts `BTreeKey` and `BTreeField`. `BTreeKey` is used as an
+address with the current node's key, which here I've specified is `NatAddr`
+(with the `btree : NatAddr -> BTreeKey` operator). Notice that `BTreeKey` is a
+subsort of `CompAddr`, which means that whatever you pick as `BTreeKey` must
+have the `_<_` defined for it.
+
+`BTreeField` is a subsort of `Addr`, meaning there are no restrictions on the
+type of addresses that can be used for `BTreeField`. Here I supply three
+`BTreeField` constructors: `v` for "value", `l` for "low", and `h` for "high".
+Thus, when performing a query for some `BTreeKey`, if it's equal to the key of
+the current node then the value can be returned by using `v`. If it's lower,
+then the lower branch of the binary tree can be accessed with `l` - similarly
+for `h` as well.
+
+```maude{exec:memory-model.maude}
+fmod BOUNDED-NAT-BTREE-MEM is
+    protecting BOUNDED-NAT-MEM .
+
+    sorts BTreeKey BTreeField .
     subsort BTreeKey < CompAddr .
+    subsort BTreeField < Addr .
 
     vars A1 A2 : CompAddr .
-    var M1 M2 : Mem .
+    var C C1 C2 : Cell .
     vars K K' : BTreeKey .
     var F : BTreeField .
 
     op btree : NatAddr -> BTreeKey [ctor] .
-    ops v l h : -> BTreeField [ctor] .
-
+    ---------------------------------------
     eq btree(A1) < btree(A2) = A1 < A2 .
 
-    ceq (K' -> M1) @ K          = M1 @ (K . l)                      if K < K' .
-    ceq (K' -> M1) @ K          = M1 @ (K . h)                      if K' < K .
-    ceq (K' -> M1) * (K -> M2)  = (K' -> (M1 * ((K . l) -> M2)))    if K < K' .
-    ceq (K' -> M1) * (K -> M2)  = (K' -> (M1 * ((K . h) -> M2)))    if K' < K .
+    ops v l h : -> BTreeField [ctor] .
+    ----------------------------------
+
+    --- op _@_ : Cell Addr -> Cell .
+    ceq (K' -> C1) @ K          = C1 @ (K . l)                      if K < K' .
+    ceq (K' -> C1) @ K          = C1 @ (K . h)                      if K' < K .
+    --- op _*_ : Cell Cell -> Cell .
+    ceq (K' -> C1) * (K -> C2)  = (K' -> (C1 * ((K . l) -> C2)))    if K < K' .
+    ceq (K' -> C1) * (K -> C2)  = (K' -> (C1 * ((K . h) -> C2)))    if K' < K .
 endfm
 ```
 
-```maude
-fmod BOUNDED-MEM is
-    extending MEM .
 
-    sort AddrComp .
-    subsorts Addr < AddrComp < AddrMap .
+Testing
+=======
 
-    vars A AS AE : AddrComp .
+I provide a module `BOUNDED-NAT-BTREE-MEM-TEST` here for demonstration purposes.
 
-    op bounded : AddrComp AddrComp -> AddrMap [ctor] .
-    --------------------------------------------------
-    ceq bounded(AS, AE) @ A = A if AS <= A and A < AE .
-    ceq bounded(AS, AE) @ A = noAddr if A < AS or AE <= A .
-endfm
-```
+```maude{exec:memory-model.maude}
+fmod BOUNDED-NAT-BTREE-MEM-TEST is
+    protecting BOUNDED-NAT-BTREE-MEM .
 
-```maude
---- set include off .
----
----
---- fmod CELL is
---- ---- ====
----     sort Cell .
----
----     op 0 : -> Addr [ctor] .
----     op s : Addr -> Addr [ctor iter] .
----     ---------------------------------
----     eq s^18446744073709551616(0) = 0 .
---- endfm
-
-
-fmod MEM is
----- ===
-    protecting NAT .
-    protecting BOOL .
-
-    sorts Addr Val .
-    subsorts Nat < Addr Val .
-    sorts Mem MemType .
-
-    op noVal : -> Val [ctor] .
-    --------------------------
-
-    op mNil : -> Mem [ctor] .
-    op _|=>_ : Addr Val -> Mem [ctor] .
-    op _|_ : Mem Mem -> Mem [ctor assoc comm id: mNil] .
-    ----------------------------------------------------
-
-    var A : Addr .
-    vars V V1 V2 : Val .
-    vars M M' M1 M2 : Mem .
-
-    op _@_ : Mem Addr -> Val [gather (E e)] .
-    -----------------------------------------
-    eq ((A |=> V) | M) @ A  = A .
-    eq M @ A                = noVal [owise] .
-
-    op _*_ : Mem Mem -> Mem [gather (E e)] .
-    ----------------------------------------
-    eq ((A |=> V1) | M1) * ((A |=> V2) | M2)
-                            = ((A |=> V2) | M1) * M2 .
-    eq (M | M1) * (M' | M2) = M | M1 | M' | M2 [owise] .
-
-    op _\_ : Mem Addr -> Mem [gather (E e)] .
-    -----------------------------------------
-    eq ((A |=> V) | M) \ A  = M .
-    eq (M | M1) \ A         = M | M1 [owise] .
-
-    op set? : Mem Addr -> Bool .
-    op unset? : Mem Addr -> Bool .
-    ------------------------------
-    eq set? (M, A)          = (M @ A) =/= noVal .
-    eq unset? (M, A)        = (M @ A) == noVal .
-endfm
-
-fmod MEM-BOUNDED is
----- ===========
-    extending MEM .
-
-    var V : Val .
-    vars K A1 A2 : Addr .
-    vars M M' : Mem .
-
-    op bounded : Addr Addr -> MemType [ctor] .
-    ------------------------------------------
-
-    op _in(_,_) : Addr Addr Addr -> Bool .
-    op _notin(_,_) : Addr Addr Addr -> Bool .
-    -----------------------------------------
-    eq K in(A1, A2)             = A1 <= K and K < A2 .
-    eq K notin(A1, A2)          = not (K in(A1, A2)) .
-
-    ceq M : bounded(A1, A2) @ K = M @ K
-                                if K in(A1, A2) .
-    ceq M : bounded(A1, A2) @ K = noVal
-                                if K notin(A1, A2) .
-    ceq M : bounded(A1, A2) * ((K |=> V) | M')
-                                = (M * (K |=> V)) : bounded(A1, A2) * M'
-                                if K in(A1, A2) .
-    ceq M : bounded(A1, A2) * ((K |=> V) | M')
-                                = M : bounded(A1, A2) * M'
-                                if K notin(A1, A2) .
-endfm
-
-fmod BTREE is
-    extending MEM .
-
-    var V : Val .
-    vars A K : Addr .
-    vars M M' : Mem .
-
-    op btree : Addr -> MemType [ctor] .
-    -----------------------------------
-
-    op nextAddr : Mem -> Addr .
+    op initialBTree : -> Cell .
     ---------------------------
-    ceq nextAddr (M : btree(A)) = A if unset?(M, A) .
-    ceq nextAddr (M : btree(A)) = nextAddr (M : btree(A + 4)) if set?(M, A) .
-
-    op newEntry : Addr Addr Val -> Mem .
-    ------------------------------------
-    eq newEntry(A, K, V) = (A |=> K) * (A + 1 |=> V) .
-
-    ceq M : btree(A) @ K    = M @ s(A)
-                            if (M @ A) == K .
-    ceq M : btree(A) @ K    = M : btree(M @ (A + 2)) @ K
-                            if K < (M @ A) and set?(M, A + 2) .
-    ceq M : btree(A) @ K    = M : btree(M @ (A + 3)) @ K
-                            if (M @ A) < K and set?(M, A + 3) .
-
-    ceq M : btree(A) * ((K |=> V) | M')
-                            = (M \ A + 2 \ A + 3)
-                                * (A |=> K) * (A + 1 |=> V) : btree(0) * M'
-                            if unset?(M, A) .
-
-    ceq M : btree(A) * ((K |=> V) | M')
-                            = M * (A + 1 |=> V) : btree(0) * M'
-                            if (M @ A) == K .
-
-    ceq M : btree(A) * ((K |=> V) | M')
-                            = M  : btree(M @ (A + 2)) * ((K |=> V) | M')
-                            if K < (M @ A) and set?(M, A + 2) .
-
-    ceq M : btree(A) * ((K |=> V) | M')
-                            = M : btree((M @ (A + 3))) * ((K |=> V) | M')
-                            if (M @ A) < K and set?(M, A + 3) .
-
-    ceq M : btree(A) * ((K |=> V) | M')
-                            = M * (A + 2 |=> nextAddr(M : btree(0))) : btree(A)
-                                * ((K |=> V) | M')
-                            if K < (M @ A) and unset?(M, A + 2) .
-
-    ceq M : btree(A) * ((K |=> V) | M')
-                            = M * (A + 3 |=> nextAddr(M : btree(0))) : btree(A)
-                                * ((K |=> V) | M')
-                            if (M @ A) < K and unset?(M, A + 3) .
-endfm
-
-fmod STRUCT is
-    extending MEM .
-
-
-endfm
-
-fmod BTREE-ELEMS is
-    protecting BTREE .
-
-    op btree-elem : Addr Addr Addr -> MemType [ctor] .
-    --------------------------------------------------
-
-    
+    eq initialBTree = (btree(a^3(0)) -> (v -> c^6(0)))
+                        * (btree(a^2(0)) -> (v -> c^10(0)))
+                        * (btree(a^13(0)) -> (v -> c^26(0)))
+                        * (btree(a^7(0)) -> (v -> c^24(0))) .
 endfm
 ```
 
-### Memory Typing
+The term `initialBTree` starts off by inserting the elements `3 -> 6`, `2 ->
+10`, `13 -> 26`, and `7 -> 24` (`key -> value`) into an empty binary tree (in
+that order). So the resulting binary tree should have `3` at the root, with `2`
+as a left child, `13` as a right child, and `7` as a left child of `13`.
 
-Operating systems (and programs) don't want to just segment memory (which is
-what permissions try for). They also want to type it - many programming
-languages have untyped memory models. Introducing a flexible type system at a
-low level makes it easier to build up layers of abstractions quickly.
+We would expect that accessing the elements defined here would return the
+correct value - demonstrated below:
 
-I use a new sort `MemType` to store information about the memory. `MemType` can
-be a basic type (declared as a constant operator of that sort), or as the union
-of other `MemType`s. Right now I'm only implementing some basic permissions
-using this. Later we could even have something like a `balanced-btree` type,
-which would serve as an instruction to an FPGA that it should implement certain
-functions (like tree rotations, insertions, etc...) in hardware, allowing the
-CPU to use higher-level acces and manipulation commands.
+```maude{exec:memory-model.maude}
+reduce initialBTree @ (v . btree(a^3(0))) .
+reduce initialBTree @ (v . btree(a^2(0))) .
+reduce initialBTree @ (v . btree(a^13(0))) .
+reduce initialBTree @ (v . btree(a^7(0))) .
+```
 
-We could also (though I have not done it yet) implement generic order-typed
-memory - making our memory look more like an order-sorted algebra. In addition
-to having equations for type equality, we could have t
+which results in the expected output below:
+
+```maude
+==========================================
+reduce in BOUNDED-NAT-BTREE-MEM-TEST : initialBTree @ v . btree(a^3(0)) .
+rewrites: 53 in 0ms cpu (0ms real) (~ rewrites/second)
+result NatCell: c^6((0).NatCell)
+==========================================
+reduce in BOUNDED-NAT-BTREE-MEM-TEST : initialBTree @ v . btree(a^2(0)) .
+rewrites: 60 in 0ms cpu (0ms real) (~ rewrites/second)
+result NatCell: c^10((0).NatCell)
+==========================================
+reduce in BOUNDED-NAT-BTREE-MEM-TEST : initialBTree @ v . btree(a^13(0)) .
+rewrites: 66 in 0ms cpu (0ms real) (~ rewrites/second)
+result NatCell: c^26((0).NatCell)
+==========================================
+reduce in BOUNDED-NAT-BTREE-MEM-TEST : initialBTree @ v . btree(a^7(0)) .
+rewrites: 78 in 0ms cpu (0ms real) (~ rewrites/second)
+result NatCell: c^24((0).NatCell)
+```
+
+We would also like to verify that updating one of the keys with a new value,
+then accessing that key again would reflect the update value. An example is
+shown below:
+
+```maude{exec:memory-model.maude}
+reduce (initialBTree * (btree(a^13(0)) -> (v -> c^100(0)))) @ (v . btree(a^13(0))) .
+```
+
+which results in the expected output:
+
+```maude
+==========================================
+reduce in BOUNDED-NAT-BTREE-MEM-TEST : (initialBTree * (btree(a^13(0)) -> v ->
+c^100(0))) @ v . btree(a^13(0)) .
+rewrites: 85 in 1ms cpu (0ms real) (85000 rewrites/second)
+result NatCell: c^100((0).NatCell)
+```
+
+
+Future Work
+===========
+
+The current memory model is better for the level of abstraction it provides than
+previous versions, though it has moved further from something directly
+implementable in hardware. It would be nice to isolate exacly which bits of the
+memory model need to be compiled down to FPGA logic. I suspect that only the
+equations which simplify out the lookup and update operators (`_@_` and `_*_`
+respectively) would be necessary to implement as FPGA logic - this would allow
+our memory (RAM) to export very simple functions for lookup and query on
+arbitrary datastructures.
+
+For example, we can use the same lookup and update operators on a flat memory
+region (`BOUNDED-NAT-MEM`), or on a binary tree (`BOUNDED-NAT-BTREE-MEM`), and
+the equational simplification rules just "do the right thing" based on the
+underlying datastructure. By putting these equational simplification rules in
+FPGA logic, our CPUs can issue generic lookup and update commands to the memory
+and the memory will just "do the right thing" under the hood, allowing for
+datastructure implementation details to be forgotten by the CPU.
+
+I also haven't had the time to implement basic memory permissions and
+segmentation using this memory model. In previous versions (see the [github
+page](https://github.com/nested-kernel/veri-funky)) I have implemented
+permissions and memory bounding. They boil down to a new type of address which
+restricts the reads and writes that make it to the underlying `Cell`. I hope to
+implement something like the Nested Kernel memory model[@nestedkernel], which
+would allow for RAM hooked up to an FPGA to act like the ideal MMU (memory
+management unit) that the Nested Kernel expects.
+
+Once I have more primitive memory address types specified, it would also be nice
+to do some verification of the memory model. Most of it will be "correct by
+construction", which means that verification boils down to inductive proofs that
+the construction was actually correct. I also suspect that what I've written
+here acts a lot like the Haskell notion of a "lens". Haskell lenses (and prisms)
+have very nice composability properties, so if I could prove that what I have
+here is a lens or a prism then I can use all the existing math of lenses and
+prisms. Perhaps this can also be used to inspire more general lookup and update
+operations as well.
 
 
 References
